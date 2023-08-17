@@ -4,10 +4,19 @@ import cv2
 import torch
 import time
 import json
-import serial  # Bluetooth通信ライブラリを追加
+import serial  # Bluetooth通信ライブラリ
+import os  # ディレクトリ作成のため
+
+# シリアル通信するかどうかのフラグ
+USE_SERIAL_COMMUNICATION = True  # これをFalseに設定するとシリアル通信は無効になります
 
 # Bluetoothシリアル設定
 ser = serial.Serial("COM4", 115200)  # COM_PORTは適切なポート名に置き換えてください。
+
+
+# 出力ファイルのディレクトリ作成
+output_dir = "./out"
+os.makedirs(output_dir, exist_ok=True)
 
 # ストリームの設定
 pipeline = rs.pipeline()
@@ -54,26 +63,42 @@ def predict(img, depth_image):
         distance = calculate_distance(depth_image, x_center, y_center)  # 距離の計算
         detected_objects.append((label, distance))
 
-    # 近い順に3つの物体情報を取得し、フォーマットする
-    formatted_objects = [
-        f"{obj[0]}: {round(obj[1] / 1000, 2)}m"
-        for obj in sorted(detected_objects, key=lambda x: x[1])[:3]
-        if obj[1] != 0
-    ]
+    # # 近い順に3つの物体情報を取得し、フォーマットする
+    # formatted_objects = [
+    #     f"{obj[0]}: {round(obj[1] / 1000, 2)}m"
+    #     for obj in sorted(detected_objects, key=lambda x: x[1])[:3]
+    #     if obj[1] != 0
+    # ]
+
+    # 物体と距離の情報を辞書形式で整形
+    detected_data = {}
+    for i, obj in enumerate(sorted(detected_objects, key=lambda x: x[1])[:3]):
+        if obj[1] != 0:
+            detected_data[obj[0]] = round(obj[1] / 1000, 2)
+        else:
+            detected_data["NA"] = "NA"
 
     # 3つ未満の場合はNA: NAで埋める
-    while len(formatted_objects) < 3:
-        formatted_objects.append("NA: NA")
+    while len(detected_data) < 3:
+        detected_data[f"NA_{len(detected_data)}"] = "NA"
 
     # JSON形式でデータを作成
-    data_to_send = json.dumps(formatted_objects)
+    data_to_send = json.dumps(detected_data)
+
+    # キャリッジリターンを追加
+    data_to_send_with_cr = data_to_send + "\r"
 
     # Bluetooth経由でデータを送信
-    ser.write(data_to_send.encode("utf-8"))
+    if USE_SERIAL_COMMUNICATION:
+        ser.write(data_to_send_with_cr.encode("utf-8"))
+
+    # ファイルに結果を書き込み
+    with open(f"{output_dir}/output.json", "w") as file:
+        file.write(data_to_send)
 
     # 画面にも表示
-    for i, obj_str in enumerate(formatted_objects):
-        print(f"{i + 1}: {obj_str}")
+    for key, value in detected_data.items():
+        print(f"{key}: {value}m" if value != "NA" else f"{key}: {value}")
 
     return result.ims[0]
 
