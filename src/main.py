@@ -3,6 +3,11 @@ import numpy as np
 import cv2
 import torch
 import time
+import json
+import serial  # Bluetooth通信ライブラリを追加
+
+# Bluetoothシリアル設定
+ser = serial.Serial("COM4", 115200)  # COM_PORTは適切なポート名に置き換えてください。
 
 # ストリームの設定
 pipeline = rs.pipeline()
@@ -49,14 +54,26 @@ def predict(img, depth_image):
         distance = calculate_distance(depth_image, x_center, y_center)  # 距離の計算
         detected_objects.append((label, distance))
 
-    # 距離が近い順にソートし、0mのものは除外
-    detected_objects = [
-        obj for obj in sorted(detected_objects, key=lambda x: x[1]) if obj[1] != 0
+    # 近い順に3つの物体情報を取得し、フォーマットする
+    formatted_objects = [
+        f"{obj[0]}: {round(obj[1] / 1000, 2)}m"
+        for obj in sorted(detected_objects, key=lambda x: x[1])[:3]
+        if obj[1] != 0
     ]
 
-    # 3つまで表示、小数点2桁まで
-    for i, (label, distance) in enumerate(detected_objects[:3]):
-        print(f"{i + 1}: {label}: {round(distance / 1000, 2)}m")
+    # 3つ未満の場合はNA: NAで埋める
+    while len(formatted_objects) < 3:
+        formatted_objects.append("NA: NA")
+
+    # JSON形式でデータを作成
+    data_to_send = json.dumps(formatted_objects)
+
+    # Bluetooth経由でデータを送信
+    ser.write(data_to_send.encode("utf-8"))
+
+    # 画面にも表示
+    for i, obj_str in enumerate(formatted_objects):
+        print(f"{i + 1}: {obj_str}")
 
     return result.ims[0]
 
