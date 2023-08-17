@@ -4,48 +4,64 @@ import cv2
 import torch
 import time
 import json
-import serial  # Bluetooth通信ライブラリ
-import os  # ディレクトリ作成のため
+import serial
+import os
+
 
 # シリアル通信するかどうかのフラグ
-USE_SERIAL_COMMUNICATION = True  # これをFalseに設定するとシリアル通信は無効になります
+USE_SERIAL_COMMUNICATION = False
 
 # Bluetoothシリアル設定
-ser = serial.Serial("COM4", 115200)  # COM_PORTは適切なポート名に置き換えてください。
-
+if USE_SERIAL_COMMUNICATION:
+    ser = serial.Serial("COM4", 115200)
 
 # 出力ファイルのディレクトリ作成
-output_dir = "./out"
-os.makedirs(output_dir, exist_ok=True)
+OUTPUT_DIR = "./out"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ストリームの設定
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+PIPELINE = rs.pipeline()
+CONFIG = rs.config()
+CONFIG.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+CONFIG.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
 
 # YOLOのモデルをロード
-model = torch.hub.load("ultralytics/yolov5", "yolov5s")
+MODEL = torch.hub.load("ultralytics/yolov5", "yolov5s")
 
 # 矩形の最小サイズのしきい値（ピクセル単位）
-RECT_THRESHOLD = int(640 / 8 * 480 / 8)
+RECT_THRESHOLD = int(1280 / 8 * 720 / 8)
+
+# 平均化範囲
+RANGE_VALUE = 3
 
 
 # 距離の平均を計算する関数
-def calculate_distance(depth_image, x, y):
-    distances = []
-    for i in range(-2, 3):
-        for j in range(-2, 3):
-            distance = depth_image[int(y) + i, int(x) + j]
-            if distance != 0:
-                distances.append(distance)
-    return sum(distances) / len(distances) if distances else 0
+def calculate_distance(depth_image, x, y, range_value):
+    x, y = int(x), int(y)
+    region = depth_image[
+        y - range_value : y + range_value + 1, x - range_value : x + range_value + 1
+    ]
+    distances = region[region != 0]
+    return np.mean(distances) if distances.size != 0 else 0
+
+
+# 物体と距離の情報を辞書形式で整形する関数
+def organize_detected_data(detected_objects):
+    detected_data = {}
+    for _, obj in enumerate(sorted(detected_objects, key=lambda x: x[1])[:3]):
+        detected_data[obj[0]] = round(obj[1] / 1000, 2) if obj[1] != 0 else "NA"
+
+    # 3つ未満の場合はNAで埋める
+    while len(detected_data) < 3:
+        detected_data[f"NA_{len(detected_data)}"] = "NA"
+
+    return detected_data
 
 
 # PyTorchを使った物体検出
 def predict(img, depth_image):
     # 推論を実行
-    result = model(img)
+    result = MODEL(img)
     result.render()
 
     # 物体と距離の情報を取得
@@ -56,44 +72,25 @@ def predict(img, depth_image):
             detection[3] - detection[1]
         ) < RECT_THRESHOLD:
             continue
-
         label = result.names[int(detection[5])]  # ラベル名のインデックスは5
         x_center = (detection[0] + detection[2]) / 2
         y_center = (detection[1] + detection[3]) / 2
-        distance = calculate_distance(depth_image, x_center, y_center)  # 距離の計算
+        distance = calculate_distance(
+            depth_image, x_center, y_center, RANGE_VALUE
+        )  # 距離の計算
         detected_objects.append((label, distance))
 
-    # # 近い順に3つの物体情報を取得し、フォーマットする
-    # formatted_objects = [
-    #     f"{obj[0]}: {round(obj[1] / 1000, 2)}m"
-    #     for obj in sorted(detected_objects, key=lambda x: x[1])[:3]
-    #     if obj[1] != 0
-    # ]
-
-    # 物体と距離の情報を辞書形式で整形
-    detected_data = {}
-    for i, obj in enumerate(sorted(detected_objects, key=lambda x: x[1])[:3]):
-        if obj[1] != 0:
-            detected_data[obj[0]] = round(obj[1] / 1000, 2)
-        else:
-            detected_data["NA"] = "NA"
-
-    # 3つ未満の場合はNA: NAで埋める
-    while len(detected_data) < 3:
-        detected_data[f"NA_{len(detected_data)}"] = "NA"
+    detected_data = organize_detected_data(detected_objects)
 
     # JSON形式でデータを作成
     data_to_send = json.dumps(detected_data)
 
-    # キャリッジリターンを追加
-    data_to_send_with_cr = data_to_send + "\r"
-
     # Bluetooth経由でデータを送信
     if USE_SERIAL_COMMUNICATION:
-        ser.write(data_to_send_with_cr.encode("utf-8"))
+        ser.write((data_to_send + "\r").encode("utf-8"))
 
     # ファイルに結果を書き込み
-    with open(f"{output_dir}/output.json", "w") as file:
+    with open(f"{OUTPUT_DIR}/output.json", "a") as file:
         file.write(data_to_send)
 
     # 画面にも表示
@@ -104,13 +101,13 @@ def predict(img, depth_image):
 
 
 def main():
-    # Start streaming
-    pipeline.start(config)
+    # ストリームの開始
+    PIPELINE.start(CONFIG)
 
     try:
         while True:
-            # Wait for a coherent pair of frames: depth and color
-            frames = pipeline.wait_for_frames()
+            # 一対のフレーム（深度とカラー）を待つ
+            frames = PIPELINE.wait_for_frames()
             depth_frame = frames.get_depth_frame()
             color_frame = frames.get_color_frame()
             if not depth_frame or not color_frame:
@@ -119,6 +116,10 @@ def main():
             # 画像をnumpy配列に変換
             depth_image = np.asanyarray(depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
+
+            # 穴埋め処理
+            hole_filling = rs.hole_filling_filter(1)
+            depth_frame = hole_filling.process(depth_frame)
 
             # 推論実行
             color_image = predict(color_image, depth_image)
@@ -134,12 +135,11 @@ def main():
             cv2.imshow("RealSense", images)
             cv2.waitKey(1)
 
-            # 更新周期を1Hzに設定
             # time.sleep(1)
 
     finally:
-        # Stop streaming
-        pipeline.stop()
+        # ストリーミングの停止
+        PIPELINE.stop()
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@ import serial  # Bluetooth通信ライブラリを追加
 # ストリームの設定
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
 
 # YOLOのモデルをロード
 model = torch.hub.load("ultralytics/yolov5", "yolov5s")
@@ -24,19 +24,22 @@ model = torch.hub.load("ultralytics/yolov5", "yolov5s")
 
 # 距離の平均を計算する関数
 def calculate_distance(depth_image, x, y):
-    distances = []
-    for i in range(-2, 3):
-        for j in range(-2, 3):
-            distance = depth_image[int(y) + i, int(x) + j]
-            if distance != 0:
-                distances.append(distance)
-    return sum(distances) / len(distances) if distances else 0
+    # distances = []
+    # for i in range(-2, 3):
+    #     for j in range(-2, 3):
+    #         distance = depth_image[int(y) + i, int(x) + j]
+    #         if distance != 0:
+    #             distances.append(distance)
+    # return sum(distances) / len(distances)
+    return depth_image[int(y), int(x)]
 
 
 # PyTorchを使った物体検出
 def predict(img, depth_image):
     # 推論を実行
     result = model(img)
+    # print(result.xyxy[0])
+    # print(result)
     result.render()
 
     # 物体と距離の情報を取得
@@ -51,6 +54,7 @@ def predict(img, depth_image):
         label = result.names[int(detection[5])]  # ラベル名のインデックスは5
         x_center = (detection[0] + detection[2]) / 2
         y_center = (detection[1] + detection[3]) / 2
+
         distance = calculate_distance(depth_image, x_center, y_center)  # 距離の計算
         detected_objects.append((label, distance))
 
@@ -82,8 +86,11 @@ def main():
     # Start streaming
     pipeline.start(config)
 
+    n = 0
+
     try:
         while True:
+            print(n)
             # Wait for a coherent pair of frames: depth and color
             frames = pipeline.wait_for_frames()
             depth_frame = frames.get_depth_frame()
@@ -91,12 +98,25 @@ def main():
             if not depth_frame or not color_frame:
                 continue
 
+
+            hole_filling = rs.hole_filling_filter(1)
+            depth_frame = hole_filling.process(depth_frame)
+
             # 画像をnumpy配列に変換
             depth_image = np.asanyarray(depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
 
+            
+
+
+            # depth_imageのうち、0の値の割合を計算
+            zero_percentage = np.count_nonzero(depth_image == 0) / depth_image.size
+            print("zero_percentage: ", zero_percentage)
+
             # 推論実行
             color_image = predict(color_image, depth_image)
+
+            # print("depth_image: ", depth_image.shape)
 
             # 深度画像をカラーマップで表示
             depth_colormap = cv2.applyColorMap(
@@ -111,6 +131,8 @@ def main():
 
             # 更新周期を1Hzに設定
             # time.sleep(1)
+
+            n = n + 1
 
     finally:
         # Stop streaming
