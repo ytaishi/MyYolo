@@ -68,6 +68,17 @@ class ObjectDetector:
         return detected_objects, rendered_image[0]  # 検出結果と画像の両方を返す
 
 
+# 白線検出
+class WhiteLineDetector:
+    def __init__(self):
+        pass
+
+    # 白黒変換を行う
+    def process(self, image):
+        grayscale_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(grayscale_image, cv2.COLOR_GRAY2BGR)
+
+
 # 検出データの整理と送信
 class DataOrganizer:
     def __init__(self, output_dir, use_serial_communication=False):
@@ -104,11 +115,7 @@ class DisplayManager:
         pass
 
     # 4分割の画像の表示
-    def display_quadrants(self, raw_image, yolo_image, depth_image):
-        # 生の映像を白黒にする
-        grayscale_image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2GRAY)
-        grayscale_image = cv2.cvtColor(grayscale_image, cv2.COLOR_GRAY2BGR)
-
+    def display_quadrants(self, raw_image, yolo_image, depth_image, white_line_image):
         # Depthの画像をカラーマップに変換
         depth_colormap = cv2.applyColorMap(
             cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET
@@ -116,7 +123,7 @@ class DisplayManager:
 
         # 4つの画像を上下左右に結合
         top_images = np.hstack((raw_image, yolo_image))
-        bottom_images = np.hstack((depth_colormap, grayscale_image))
+        bottom_images = np.hstack((depth_colormap, white_line_image))
         combined = np.vstack((top_images, bottom_images))
 
         cv2.namedWindow("Quadrants", cv2.WINDOW_NORMAL)
@@ -131,13 +138,16 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     config = rs.config()
+
     realsense_manager = RealSenseManager(config)
     object_detector = ObjectDetector()
+    white_line_detector = WhiteLineDetector()
     data_organizer = DataOrganizer(OUTPUT_DIR, USE_SERIAL_COMMUNICATION)
 
     display_manager = DisplayManager()
 
     realsense_manager.start_streaming()
+
     try:
         while True:
             depth_frame, color_frame = realsense_manager.get_frames()
@@ -155,7 +165,11 @@ def main():
             detected_data = data_organizer.organize_data(detected_objects)
             data_organizer.send_data(detected_data)
 
-            display_manager.display_quadrants(raw_color_image, yolo_image, depth_image)
+            white_line_image = white_line_detector.process(raw_color_image)
+
+            display_manager.display_quadrants(
+                raw_color_image, yolo_image, depth_image, white_line_image
+            )
     finally:
         realsense_manager.stop_streaming()
 
