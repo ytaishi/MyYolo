@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # 画像の読み込み
-image = cv2.imread("materials\g9pc7kz6.bmp", cv2.IMREAD_COLOR)
+image = cv2.imread("materials\Screenshot 2023-10-21 12-01-17.png", cv2.IMREAD_COLOR)
 
 # グレースケールに変換
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
