@@ -86,7 +86,7 @@ class WhiteLineDetector:
 
         # 白色を検出するための閾値
         lower_white = np.array([0, 0, 200], dtype=np.uint8)
-        upper_white = np.array([180, 255, 255], dtype=np.uint8)
+        upper_white = np.array([180, 50, 255], dtype=np.uint8)
 
         # 白色のみ抽出
         mask = cv2.inRange(hsv, lower_white, upper_white)
@@ -96,7 +96,7 @@ class WhiteLineDetector:
     # ぼかしフィルタを適用する関数
     def apply_blur(self, image):
         # ガウシアンぼかしを適用
-        blurred_image = cv2.GaussianBlur(image, (1, 1), 0)
+        blurred_image = cv2.GaussianBlur(image, (5, 5), 0)
         return blurred_image
 
     # 白線を検出する関数

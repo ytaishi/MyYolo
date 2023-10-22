@@ -27,4 +27,4 @@ def detect_lines(image_path):
 
 if __name__ == "__main__":
     # 画像パスを指定して関数を実行
-    detect_lines("materials\g9pc7kz6.bmp")
+    detect_lines("materials\Screenshot 2023-10-21 13-24-59.png")

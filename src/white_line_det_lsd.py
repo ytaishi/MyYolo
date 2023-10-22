@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+import pylsd
 
 
 # 射影変換を行う関数
@@ -24,11 +25,19 @@ def preprocess_mask(mask):
     return cv2.GaussianBlur(mask, (15, 15), 0)
 
 
+# # 線分検出 (LSD) 関数
+# def detect_lines(mask):
+#     lsd = cv2.createLineSegmentDetector(0)
+#     print(f"detecte results:  {lsd.detect(mask)}")
+#     return lsd.detect(mask)
+
+
 # 線分検出 (LSD) 関数
 def detect_lines(mask):
-    lsd = cv2.createLineSegmentDetector(0)
-    print(lsd.detect(mask))
-    return lsd.detect(mask)
+    # PyLSDを使用
+    lines = lsd(mask)
+    print(f"Detected lines: {lines.shape}")
+    return lines
 
 
 # 線分の角度が近似しているかを確認
@@ -41,16 +50,10 @@ def find_parallel_lines(lines, angle_threshold=10):
     parallel_lines = []
     for i in range(len(lines)):
         for j in range(i + 1, len(lines)):
-            angle1 = (
-                math.atan2(lines[i][3] - lines[i][1], lines[i][2] - lines[i][0])
-                * 180.0
-                / math.pi
-            )
-            angle2 = (
-                math.atan2(lines[j][3] - lines[j][1], lines[j][2] - lines[j][0])
-                * 180.0
-                / math.pi
-            )
+            x1, y1, x2, y2 = lines[i]
+            angle1 = math.atan2(y2 - y1, x2 - x1) * 180.0 / math.pi
+            x1, y1, x2, y2 = lines[j]
+            angle2 = math.atan2(y2 - y1, x2 - x1) * 180.0 / math.pi
             if are_angles_similar(angle1, angle2, angle_threshold):
                 parallel_lines.append((lines[i], lines[j]))
     return parallel_lines
@@ -86,7 +89,9 @@ def filter_lines(image, lines):
         # 形状を(n, 4)に変更
         lines = lines.squeeze()
         for line1, line2 in find_parallel_lines(lines):
-            if is_within_distance(line1, line2) and is_inside_white(image, line1, line2):
+            if is_within_distance(line1, line2) and is_inside_white(
+                image, line1, line2
+            ):
                 filtered_lines.append(line1)
                 filtered_lines.append(line2)
     return filtered_lines
@@ -94,9 +99,11 @@ def filter_lines(image, lines):
 
 # 線分を描画する関数
 def draw_lines(image, lines):
-    for line in lines:
-        x0, y0, x1, y1 = line
-        cv2.line(image, (x0, y0), (x1, y1), (0, 255, 0), 2)
+    if lines is not None:
+        lines = lines.reshape(-1, 4)
+        for line in lines:
+            x0, y0, x1, y1 = line
+            cv2.line(image, (x0, y0), (x1, y1), (0, 255, 0), 2)
 
 
 if __name__ == "__main__":
@@ -122,7 +129,7 @@ if __name__ == "__main__":
         # 線分のフィルタリング
         filtered_lines = filter_lines(transformed_image, lines)
         # 線分の描画
-        draw_lines(transformed_image, filtered_lines)
+        draw_lines(transformed_image, lines)
         # 画像の表示
         cv2.imshow("Original Image", frame)
         cv2.imshow("White Lines Detected", transformed_image)
