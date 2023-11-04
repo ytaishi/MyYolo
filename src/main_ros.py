@@ -6,6 +6,9 @@ import json
 import serial
 import os
 
+import rclpy
+from std_msgs.msg import String
+
 
 # RealSenseカメラの管理とデータストリームの処理
 class RealSenseManager:
@@ -148,9 +151,15 @@ class DataOrganizer:
         return detected_data
 
     # データの送信
-    def send_data(self, detected_data):
+    def send_data(self, detected_data, pub):
         data_to_send = json.dumps(detected_data)
         print(data_to_send)
+
+        # メッセージの作成と送信
+        msg = String()
+        msg.data = data_to_send
+        pub.publish(msg)
+
         if self.use_serial_communication:
             self.ser.write((data_to_send + "\r").encode("utf-8"))
         with open(f"{self.output_dir}/output.json", "a") as file:
@@ -185,6 +194,13 @@ def main():
     OUTPUT_DIR = "./out"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # ノードの初期化
+    rclpy.init()
+    node = rclpy.create_node("publisher_node")
+
+    # パブリッシャの設定
+    pub = node.create_publisher(String, "topic", 10)
+
     config = rs.config()
 
     realsense_manager = RealSenseManager(config)
@@ -211,12 +227,7 @@ def main():
             )  # 変更された部分
 
             detected_data = data_organizer.organize_data(detected_objects)
-            data_organizer.send_data(detected_data)
-
-            # 射影変換を行う
-            # transformed_image = white_line_detector.perspective_transform(
-            #     raw_color_image
-            # )
+            data_organizer.send_data(detected_data, pub)
 
             # 白線を検出する
             white_line_image = white_line_detector.detect_white_lines(raw_color_image)
@@ -224,8 +235,10 @@ def main():
             display_manager.display_quadrants(
                 raw_color_image, yolo_image, depth_image, white_line_image
             )
+
     finally:
         realsense_manager.stop_streaming()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
