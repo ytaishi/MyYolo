@@ -96,13 +96,16 @@ class WhiteLineDetector:
     # ぼかしフィルタを適用する関数
     def apply_blur(self, image):
         # ガウシアンぼかしを適用
-        blurred_image = cv2.GaussianBlur(image, (5, 5), 0)
+        blurred_image = cv2.GaussianBlur(image, (15, 15), 0)
         return blurred_image
 
     # 白線を検出する関数
     def detect_white_lines(self, image):
+        # 処理する領域を画像から切り抜き
+        region_of_interest = image[360:720, 0:1280]
+
         # ぼかしフィルタを適用
-        blurred_image = self.apply_blur(image)
+        blurred_image = self.apply_blur(region_of_interest)
 
         # 白色を検出
         mask = self.detect_white(blurred_image)
@@ -117,7 +120,7 @@ class WhiteLineDetector:
 
         if lines is not None:
             for line in lines:
-                x1, y1, x2, y2 = line[0]
+                x1, y1, x2, y2 = line[0]+[0, 360, 0, 360]
                 angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
                 if -10 <= angle <= 10:
                     cv2.line(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
@@ -211,12 +214,12 @@ def main():
             data_organizer.send_data(detected_data)
 
             # 射影変換を行う
-            transformed_image = white_line_detector.perspective_transform(
-                raw_color_image
-            )
+            # transformed_image = white_line_detector.perspective_transform(
+            #     raw_color_image
+            # )
 
             # 白線を検出する
-            white_line_image = white_line_detector.detect_white_lines(transformed_image)
+            white_line_image = white_line_detector.detect_white_lines(raw_color_image)
 
             display_manager.display_quadrants(
                 raw_color_image, yolo_image, depth_image, white_line_image
