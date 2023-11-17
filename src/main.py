@@ -38,18 +38,34 @@ class ObjectDetector:
     def __init__(self):
         self.model = torch.hub.load("ultralytics/yolov5", "yolov5s")
         self.rect_threshold = int(1280 / 8 * 720 / 8)
+        self.confidence_threshold = 0.5  # 確信度のしきい値を設定
+        self.model.conf = self.confidence_threshold
+
+    # 検出された物体のフィルタリング
+    def filter_detections(self, detections):
+        filtered_detections = []
+        for detection in detections:
+            area = (detection[2] - detection[0]) * (detection[3] - detection[1])
+
+            # 面積と確信度に基づいてフィルタリング
+            if area >= self.rect_threshold:
+                filtered_detections.append(detection)
+
+        return filtered_detections
 
     # 物体の検出
     def detect_objects(self, img):
-        img_copy = img.copy()  # imgのコピーを作成
-        result = self.model(img_copy)  # コピーに対してYoloの検出を行う
+        # img_copy = img.copy()
+
+        # yolo実行
+        result = self.model(img)
         detected_objects = []
 
-        for detection in result.xyxy[0]:
-            if (detection[2] - detection[0]) * (
-                detection[3] - detection[1]
-            ) < self.rect_threshold:
-                continue
+        # フィルタリングされた検出結果を取得
+        filtered_detections = self.filter_detections(result.xyxy[0])
+
+        # フィルタリングされた結果を処理
+        for detection in filtered_detections:
             label = result.names[int(detection[5])]
             x_center = (detection[0] + detection[2]) / 2
             y_center = (detection[1] + detection[3]) / 2
@@ -61,7 +77,7 @@ class ObjectDetector:
 # 距離計算クラス
 class DistanceCalculator:
     def __init__(self):
-        self.range_value = 3
+        self.range_value = 1
 
     # 距離の計算
     def calculate_distance(self, depth_image, x, y):
@@ -163,6 +179,36 @@ class DataOrganizer:
         if self.use_serial_communication:
             self.ser = serial.Serial("COM4", 115200)
 
+        self.detected_classes = ["person", "dog", "cat"]
+        self.distance_threshold = 500
+
+        self.x_range = [0 + 200, 1280 - 200]
+        self.y_range = [0 + 100, 720 - 100]
+
+    # YOLOとライントラックの結果を分析する関数
+    def analyze_yolo_results(self, yolo_results, x_range, y_range):
+        for result in yolo_results:
+            if result[0] in self.detected_classes:
+                distance = result[3]
+                x, y = result[1], result[2]
+                print(distance, x, y)
+                if (
+                    distance < self.distance_threshold
+                    and x_range[0] <= x <= x_range[1]
+                    and y_range[0] <= y <= y_range[1]
+                ):
+                    return True
+        return False
+
+    # 白線検出の結果を分析する関数
+    def analyze_linetrack_results(self, linetrack_results, distance_threshold, x_range):
+        for result in linetrack_results:
+            distance = result["distance"]
+            x = result["x_coordinate"]
+            if distance < distance_threshold and x_range[0] <= x <= x_range[1]:
+                return True
+        return False
+
     # 物体と距離の情報を辞書形式で整形する関数
     def organize_data(self, detected_objects):
         detected_data = {}
@@ -249,20 +295,24 @@ def main():
             # 生のカラー画像を保存
             raw_color_image = color_image.copy()
 
-            # 物体検出の部分
-            detected_objects, yolo_image = object_detector.detect_objects(color_image)
+            # 物体検出の実行
+            detected_objects, yolo_image = object_detector.detect_objects(
+                color_image
+            )  # (Label,x,y),image
 
-            # 距離計算の部分
+            # 検出された物体の距離を計算
             detected_objects_with_distance = []
             for label, x_center, y_center in detected_objects:
                 distance = distance_calculator.calculate_distance(
                     depth_image, x_center, y_center
                 )
-                detected_objects_with_distance.append((label, distance))
+                detected_objects_with_distance.append(
+                    (label, x_center, y_center, distance)
+                )
 
-            # 検出データの整理と送信
-            detected_data = data_organizer.organize_data(detected_objects)
-            data_organizer.send_data(detected_data)
+            # # 検出データの整理と送信
+            # detected_data = data_organizer.organize_data(detected_objects)
+            # data_organizer.send_data(detected_data)
 
             # 白線を検出する
             white_lines = white_line_detector.detect_white_lines(color_image)
@@ -276,7 +326,9 @@ def main():
 
             # 白線の座標から距離を計算する
             for x, y in line_centers:
-                distance = distance_calculator.calculate_distance(depth_image, x, y)
+                distance = (
+                    distance_calculator.calculate_distance(depth_image, x, y) / 1000
+                )
                 print(distance)
 
             # 画像に検出した直線を描画
@@ -288,6 +340,16 @@ def main():
             display_manager.display_quadrants(
                 raw_color_image, yolo_image, depth_image, white_line_image
             )
+
+            # この辺からデータ整理
+
+            # YOLOの結果を整理
+            obstacle_exists = data_organizer.analyze_yolo_results(
+                detected_objects_with_distance, data_organizer.x_range, data_organizer.y_range
+            )
+
+            print(obstacle_exists)
+
     finally:
         realsense_manager.stop_streaming()
 
