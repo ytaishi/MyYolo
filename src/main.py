@@ -12,30 +12,55 @@ class RealSenseManager:
     def __init__(self, config):
         self.pipeline = rs.pipeline()
         self.config = config
-        self.config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
-        self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
+        self.config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 5)
+        self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 5)
+        self.align = rs.align(rs.stream.color)  # RGB画像に合わせて深度画像をアライメントする
 
     # ストリームの開始
     def start_streaming(self):
         self.pipeline.start(self.config)
 
-    # フレームの取得
+    # アライメントされたフレームの取得
     def get_frames(self):
         frames = self.pipeline.wait_for_frames()
-        depth_frame = frames.get_depth_frame()
-        color_frame = frames.get_color_frame()
-        return depth_frame, color_frame
+        aligned_frames = self.align.process(frames)
+        aligned_depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+        return aligned_depth_frame, color_frame
 
     # ストリームの停止
     def stop_streaming(self):
         self.pipeline.stop()
 
 
-# 物体検出と距離の計算
+# 物体検出クラス
 class ObjectDetector:
     def __init__(self):
         self.model = torch.hub.load("ultralytics/yolov5", "yolov5s")
         self.rect_threshold = int(1280 / 8 * 720 / 8)
+
+    # 物体の検出
+    def detect_objects(self, img):
+        img_copy = img.copy()  # imgのコピーを作成
+        result = self.model(img_copy)  # コピーに対してYoloの検出を行う
+        detected_objects = []
+
+        for detection in result.xyxy[0]:
+            if (detection[2] - detection[0]) * (
+                detection[3] - detection[1]
+            ) < self.rect_threshold:
+                continue
+            label = result.names[int(detection[5])]
+            x_center = (detection[0] + detection[2]) / 2
+            y_center = (detection[1] + detection[3]) / 2
+            detected_objects.append((label, x_center, y_center))
+
+        return detected_objects, result.render()[0]  # 検出結果と画像の両方を返す
+
+
+# 距離計算クラス
+class DistanceCalculator:
+    def __init__(self):
         self.range_value = 3
 
     # 距離の計算
@@ -47,25 +72,6 @@ class ObjectDetector:
         ]
         distances = region[region != 0]
         return np.mean(distances) if distances.size != 0 else 0
-
-    # 物体の検出
-    def detect_objects(self, img, depth_image):
-        img_copy = img.copy()  # imgのコピーを作成
-        result = self.model(img_copy)  # コピーに対してYoloの検出を行う
-        rendered_image = result.render()  # Yoloの検出結果ありの画像を取得
-
-        detected_objects = []
-        for detection in result.xyxy[0]:
-            if (detection[2] - detection[0]) * (
-                detection[3] - detection[1]
-            ) < self.rect_threshold:
-                continue
-            label = result.names[int(detection[5])]
-            x_center = (detection[0] + detection[2]) / 2
-            y_center = (detection[1] + detection[3]) / 2
-            distance = self.calculate_distance(depth_image, x_center, y_center)
-            detected_objects.append((label, distance))
-        return detected_objects, rendered_image[0]  # 検出結果と画像の両方を返す
 
 
 # 白線検出
@@ -95,7 +101,6 @@ class WhiteLineDetector:
 
     # ぼかしフィルタを適用する関数
     def apply_blur(self, image):
-        # ガウシアンぼかしを適用
         blurred_image = cv2.GaussianBlur(image, (15, 15), 0)
         return blurred_image
 
@@ -121,13 +126,33 @@ class WhiteLineDetector:
             canny, 1, np.pi / 180, threshold=100, minLineLength=200, maxLineGap=20
         )
 
+        return lines
+
+    # 水平に近い白線のみを残す関数
+    def filter_horizontal_lines(self, lines):
+        horizontal_lines = []
         if lines is not None:
             for line in lines:
-                x1, y1, x2, y2 = line[0] + [0, 360, 0, 360]
+                x1, y1, x2, y2 = line[0]
                 angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
                 if -10 <= angle <= 10:
-                    cv2.line(processed_image, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        return processed_image
+                    horizontal_lines.append(line)
+        return horizontal_lines
+
+    # 白線の中心座標を求める関数
+    def calculate_line_centers(self, lines):
+        centers = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            centers.append(((x1 + x2) // 2, (y1 + y2) // 2))
+        return centers
+
+    # 画像に検出した直線を描画する関数
+    def draw_lines(self, image, lines):
+        for line in lines:
+            x1, y1, x2, y2 = line[0] + [0, 360, 0, 360]
+            cv2.line(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        return image
 
 
 # 検出データの整理と送信
@@ -142,7 +167,9 @@ class DataOrganizer:
     def organize_data(self, detected_objects):
         detected_data = {}
         for _, obj in enumerate(sorted(detected_objects, key=lambda x: x[1])[:3]):
-            detected_data[obj[0]] = round(obj[1] / 1000, 2) if obj[1] != 0 else "NA"
+            # Tensorをfloat型に変換してからround関数を適用
+            distance = obj[1].item() if obj[1] != 0 else 0
+            detected_data[obj[0]] = round(distance / 1000, 2) if distance != 0 else "NA"
 
         # 3つ未満の場合はNAで埋める
         while len(detected_data) < 3:
@@ -192,6 +219,7 @@ def main():
 
     realsense_manager = RealSenseManager(config)
     object_detector = ObjectDetector()
+    distance_calculator = DistanceCalculator()
     white_line_detector = WhiteLineDetector()
     data_organizer = DataOrganizer(OUTPUT_DIR, USE_SERIAL_COMMUNICATION)
 
@@ -201,29 +229,62 @@ def main():
 
     try:
         while True:
+            # 画像取得
             depth_frame, color_frame = realsense_manager.get_frames()
+
+            # 画像が取得できなかった場合はスキップ
             if not depth_frame or not color_frame:
                 continue
-            depth_image = np.asanyarray(depth_frame.get_data())
-            raw_color_image = np.asanyarray(color_frame.get_data())  # 生の映像を保存
+
+            # 深度画像の穴埋め
             hole_filling = rs.hole_filling_filter(1)
             depth_frame = hole_filling.process(depth_frame)
 
-            detected_objects, yolo_image = object_detector.detect_objects(
-                raw_color_image, depth_image
-            )  # 変更された部分
+            # 深度画像をnumpy配列に変換
+            depth_image = np.asanyarray(depth_frame.get_data())
 
+            # カラー画像をnumpy配列に変換
+            color_image = np.asanyarray(color_frame.get_data())
+
+            # 生のカラー画像を保存
+            raw_color_image = color_image.copy()
+
+            # 物体検出の部分
+            detected_objects, yolo_image = object_detector.detect_objects(color_image)
+
+            # 距離計算の部分
+            detected_objects_with_distance = []
+            for label, x_center, y_center in detected_objects:
+                distance = distance_calculator.calculate_distance(
+                    depth_image, x_center, y_center
+                )
+                detected_objects_with_distance.append((label, distance))
+
+            # 検出データの整理と送信
             detected_data = data_organizer.organize_data(detected_objects)
             data_organizer.send_data(detected_data)
 
-            # 射影変換を行う
-            # transformed_image = white_line_detector.perspective_transform(
-            #     raw_color_image
-            # )
-
             # 白線を検出する
-            white_line_image = white_line_detector.detect_white_lines(raw_color_image)
+            white_lines = white_line_detector.detect_white_lines(color_image)
 
+            # 水平に近い白線のみを残す
+            horizontal_lines = white_line_detector.filter_horizontal_lines(white_lines)
+
+            # 白線の中心座標を求める
+            line_centers = white_line_detector.calculate_line_centers(horizontal_lines)
+            print(line_centers)
+
+            # 白線の座標から距離を計算する
+            for x, y in line_centers:
+                distance = distance_calculator.calculate_distance(depth_image, x, y)
+                print(distance)
+
+            # 画像に検出した直線を描画
+            white_line_image = white_line_detector.draw_lines(
+                color_image, horizontal_lines
+            )
+
+            # 画像の表示
             display_manager.display_quadrants(
                 raw_color_image, yolo_image, depth_image, white_line_image
             )
