@@ -101,8 +101,11 @@ class WhiteLineDetector:
 
     # 白線を検出する関数
     def detect_white_lines(self, image):
+        # 元の画像をコピー
+        processed_image = image.copy()
+
         # 処理する領域を画像から切り抜き
-        region_of_interest = image[360:720, 0:1280]
+        region_of_interest = processed_image[360:720, 0:1280]
 
         # ぼかしフィルタを適用
         blurred_image = self.apply_blur(region_of_interest)
@@ -123,8 +126,8 @@ class WhiteLineDetector:
                 x1, y1, x2, y2 = line[0] + [0, 360, 0, 360]
                 angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
                 if -10 <= angle <= 10:
-                    cv2.line(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        return image
+                    cv2.line(processed_image, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        return processed_image
 
 
 # 検出データの整理と送信
