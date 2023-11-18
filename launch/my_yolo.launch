@@ -1,5 +1,6 @@
 <launch>
     <node pkg="MyYolo" type="main.py" name="main" ns="main">
-	</node>
+        <env name="PYTHONPATH" value="/home/musashikosugi/Cub/RealSense/MyYolo-MakeClass/.venv/bin/python3.9:$PYTHONPATH"/>
+    </node>
 
 </launch>

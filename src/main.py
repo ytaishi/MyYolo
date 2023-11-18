@@ -89,7 +89,7 @@ class DistanceCalculator:
             y - self.range_value : y + self.range_value + 1,
             x - self.range_value : x + self.range_value + 1,
         ]
-        distances = region[region != 0]
+        distances = region[region != 0] / 1000
         return np.mean(distances) if distances.size != 0 else 0
 
 
@@ -183,7 +183,7 @@ class DataOrganizer:
             self.ser = serial.Serial("COM4", 115200)
 
         self.detected_classes = ["person", "dog", "cat"]
-        self.distance_threshold = 500
+        self.distance_threshold = 1.0
 
         self.x_range = [0 + 200, 1280 - 200]
         self.y_range = [0 + 100, 720 - 100]
@@ -306,6 +306,10 @@ def main():
             # 検出された物体の距離を計算
             detected_objects_with_distance = []
             for label, x_center, y_center in detected_objects:
+                # 中心座標をtensor形式からint型に変換
+                x_center = int(x_center)
+                y_center = int(y_center)
+
                 distance = distance_calculator.calculate_distance(
                     depth_image, x_center, y_center
                 )
@@ -330,9 +334,9 @@ def main():
             # 白線の座標から距離を計算する
             for x, y in line_centers:
                 distance = (
-                    distance_calculator.calculate_distance(depth_image, x, y) / 1000
+                    distance_calculator.calculate_distance(depth_image, x, y)
                 )
-                print(distance)
+                print(f"white_line_distance: {distance}")
 
             # 画像に検出した直線を描画
             white_line_image = white_line_detector.draw_lines(
@@ -348,7 +352,9 @@ def main():
 
             # YOLOの結果を整理
             obstacle_exists = data_organizer.analyze_yolo_results(
-                detected_objects_with_distance, data_organizer.x_range, data_organizer.y_range
+                detected_objects_with_distance,
+                data_organizer.x_range,
+                data_organizer.y_range,
             )
 
             print(obstacle_exists)
