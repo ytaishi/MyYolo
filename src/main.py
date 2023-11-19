@@ -183,32 +183,37 @@ class DataOrganizer:
             self.ser = serial.Serial("COM4", 115200)
 
         self.detected_classes = ["person", "dog", "cat"]
-        self.distance_threshold = 1.0
+        self.obstacle_distance_threshold = 1.0
+        self.line_distance_threshold = 0.7
 
-        self.x_range = [0 + 200, 1280 - 200]
-        self.y_range = [0 + 100, 720 - 100]
+        self.x_range = [0 + 0, 1280 - 0]
+        self.y_range = [0 + 0, 720 - 0]
+        self.line_y_range = [0 + 1280 / 2, 1280 - 0]
 
-    # YOLOとライントラックの結果を分析する関数
-    def analyze_yolo_results(self, yolo_results, x_range, y_range):
+    # YOLOの結果を分析する関数
+    def analyze_yolo_results(self, yolo_results):
         for result in yolo_results:
             if result[0] in self.detected_classes:
                 distance = result[3]
                 x, y = result[1], result[2]
                 print(distance, x, y)
                 if (
-                    distance < self.distance_threshold
-                    and x_range[0] <= x <= x_range[1]
-                    and y_range[0] <= y <= y_range[1]
+                    distance < self.obstacle_distance_threshold
+                    and self.x_range[0] <= x <= self.x_range[1]
+                    and self.y_range[0] <= y <= self.y_range[1]
                 ):
                     return True
         return False
 
     # 白線検出の結果を分析する関数
-    def analyze_linetrack_results(self, linetrack_results, distance_threshold, x_range):
-        for result in linetrack_results:
-            distance = result["distance"]
-            x = result["x_coordinate"]
-            if distance < distance_threshold and x_range[0] <= x <= x_range[1]:
+    def analyze_line_results(self, line_results):
+        for result in line_results:
+            distance = result[3]
+            y = result[2]
+            if (
+                distance < self.line_distance_threshold
+                and self.line_y_range[0] <= y <= self.line_y_range[1]
+            ):
                 return True
         return False
 
@@ -258,7 +263,6 @@ class DisplayManager:
         cv2.waitKey(1)
 
 
-# メイン関数
 def main():
     USE_SERIAL_COMMUNICATION = False
     OUTPUT_DIR = "./out"
@@ -333,9 +337,7 @@ def main():
 
             # 白線の座標から距離を計算する
             for x, y in line_centers:
-                distance = (
-                    distance_calculator.calculate_distance(depth_image, x, y)
-                )
+                distance = distance_calculator.calculate_distance(depth_image, x, y)
                 print(f"white_line_distance: {distance}")
 
             # 画像に検出した直線を描画
@@ -353,11 +355,15 @@ def main():
             # YOLOの結果を整理
             obstacle_exists = data_organizer.analyze_yolo_results(
                 detected_objects_with_distance,
-                data_organizer.x_range,
-                data_organizer.y_range,
             )
 
-            print(obstacle_exists)
+            # ライントラックの結果を整理
+            line_exists = data_organizer.analyze_line_results(
+                line_centers, data_organizer.x_range
+            )
+
+            print(f"obstacle_exists: {obstacle_exists}")
+            print(f"line_exists: {line_exists}")
 
     finally:
         realsense_manager.stop_streaming()

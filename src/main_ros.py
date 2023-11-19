@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+#! coding:utf-8
+
 import pyrealsense2 as rs
 import numpy as np
 import cv2
@@ -9,37 +12,85 @@ import os
 import rclpy
 from std_msgs.msg import String
 
+import rospy
+from std_msgs.msg import String
+import json
+import os
+import serial
+import numpy as np
+
 
 # RealSenseカメラの管理とデータストリームの処理
 class RealSenseManager:
     def __init__(self, config):
         self.pipeline = rs.pipeline()
         self.config = config
-        self.config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
-        self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
+        self.config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 5)
+        self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 5)
+        self.align = rs.align(rs.stream.color)  # RGB画像に合わせて深度画像をアライメントする
 
     # ストリームの開始
     def start_streaming(self):
         self.pipeline.start(self.config)
 
-    # フレームの取得
+    # アライメントされたフレームの取得
     def get_frames(self):
         frames = self.pipeline.wait_for_frames()
-        depth_frame = frames.get_depth_frame()
-        color_frame = frames.get_color_frame()
-        return depth_frame, color_frame
+        aligned_frames = self.align.process(frames)
+        aligned_depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+        return aligned_depth_frame, color_frame
 
     # ストリームの停止
     def stop_streaming(self):
         self.pipeline.stop()
 
 
-# 物体検出と距離の計算
+# 物体検出クラス
 class ObjectDetector:
     def __init__(self):
         self.model = torch.hub.load("ultralytics/yolov5", "yolov5s")
         self.rect_threshold = int(1280 / 8 * 720 / 8)
-        self.range_value = 3
+        self.confidence_threshold = 0.5  # 確信度のしきい値を設定
+        self.model.conf = self.confidence_threshold
+
+    # 検出された物体のフィルタリング
+    def filter_detections(self, detections):
+        filtered_detections = []
+        for detection in detections:
+            area = (detection[2] - detection[0]) * (detection[3] - detection[1])
+
+            # 面積と確信度に基づいてフィルタリング
+            if area >= self.rect_threshold:
+                filtered_detections.append(detection)
+
+        return filtered_detections
+
+    # 物体の検出
+    def detect_objects(self, img):
+        # img_copy = img.copy()
+
+        # yolo実行
+        result = self.model(img)
+        detected_objects = []
+
+        # フィルタリングされた検出結果を取得
+        filtered_detections = self.filter_detections(result.xyxy[0])
+
+        # フィルタリングされた結果を処理
+        for detection in filtered_detections:
+            label = result.names[int(detection[5])]
+            x_center = (detection[0] + detection[2]) / 2
+            y_center = (detection[1] + detection[3]) / 2
+            detected_objects.append((label, x_center, y_center))
+
+        return detected_objects, result.render()[0]  # 検出結果と画像の両方を返す
+
+
+# 距離計算クラス
+class DistanceCalculator:
+    def __init__(self):
+        self.range_value = 1
 
     # 距離の計算
     def calculate_distance(self, depth_image, x, y):
@@ -48,27 +99,8 @@ class ObjectDetector:
             y - self.range_value : y + self.range_value + 1,
             x - self.range_value : x + self.range_value + 1,
         ]
-        distances = region[region != 0]
+        distances = region[region != 0] / 1000
         return np.mean(distances) if distances.size != 0 else 0
-
-    # 物体の検出
-    def detect_objects(self, img, depth_image):
-        img_copy = img.copy()  # imgのコピーを作成
-        result = self.model(img_copy)  # コピーに対してYoloの検出を行う
-        rendered_image = result.render()  # Yoloの検出結果ありの画像を取得
-
-        detected_objects = []
-        for detection in result.xyxy[0]:
-            if (detection[2] - detection[0]) * (
-                detection[3] - detection[1]
-            ) < self.rect_threshold:
-                continue
-            label = result.names[int(detection[5])]
-            x_center = (detection[0] + detection[2]) / 2
-            y_center = (detection[1] + detection[3]) / 2
-            distance = self.calculate_distance(depth_image, x_center, y_center)
-            detected_objects.append((label, distance))
-        return detected_objects, rendered_image[0]  # 検出結果と画像の両方を返す
 
 
 # 白線検出
@@ -98,7 +130,6 @@ class WhiteLineDetector:
 
     # ぼかしフィルタを適用する関数
     def apply_blur(self, image):
-        # ガウシアンぼかしを適用
         blurred_image = cv2.GaussianBlur(image, (15, 15), 0)
         return blurred_image
 
@@ -124,13 +155,33 @@ class WhiteLineDetector:
             canny, 1, np.pi / 180, threshold=100, minLineLength=200, maxLineGap=20
         )
 
+        return lines
+
+    # 水平に近い白線のみを残す関数
+    def filter_horizontal_lines(self, lines):
+        horizontal_lines = []
         if lines is not None:
             for line in lines:
-                x1, y1, x2, y2 = line[0] + [0, 360, 0, 360]
+                x1, y1, x2, y2 = line[0]
                 angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
                 if -10 <= angle <= 10:
-                    cv2.line(processed_image, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        return processed_image
+                    horizontal_lines.append(line)
+        return horizontal_lines
+
+    # 白線の中心座標を求める関数
+    def calculate_line_centers(self, lines):
+        centers = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            centers.append(((x1 + x2) // 2, (y1 + y2) // 2))
+        return centers
+
+    # 画像に検出した直線を描画する関数
+    def draw_lines(self, image, lines):
+        for line in lines:
+            x1, y1, x2, y2 = line[0] + [0, 360, 0, 360]
+            cv2.line(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        return image
 
 
 # 検出データの整理と送信
@@ -141,11 +192,48 @@ class DataOrganizer:
         if self.use_serial_communication:
             self.ser = serial.Serial("COM4", 115200)
 
+        self.detected_classes = ["person", "dog", "cat"]
+        self.obstacle_distance_threshold = 1.0
+        self.line_distance_threshold = 0.7
+
+        self.x_range = [0 + 0, 1280 - 0]
+        self.y_range = [0 + 0, 720 - 0]
+        self.line_y_range = [0 + 1280 / 2, 1280 - 0]
+
+    # YOLOの結果を分析する関数
+    def analyze_yolo_results(self, yolo_results):
+        for result in yolo_results:
+            if result[0] in self.detected_classes:
+                distance = result[3]
+                x, y = result[1], result[2]
+                print(distance, x, y)
+                if (
+                    distance < self.obstacle_distance_threshold
+                    and self.x_range[0] <= x <= self.x_range[1]
+                    and self.y_range[0] <= y <= self.y_range[1]
+                ):
+                    return True
+        return False
+
+    # 白線検出の結果を分析する関数
+    def analyze_line_results(self, line_results):
+        for result in line_results:
+            distance = result[3]
+            y = result[2]
+            if (
+                distance < self.line_distance_threshold
+                and self.line_y_range[0] <= y <= self.line_y_range[1]
+            ):
+                return True
+        return False
+
     # 物体と距離の情報を辞書形式で整形する関数
     def organize_data(self, detected_objects):
         detected_data = {}
         for _, obj in enumerate(sorted(detected_objects, key=lambda x: x[1])[:3]):
-            detected_data[obj[0]] = round(obj[1] / 1000, 2) if obj[1] != 0 else "NA"
+            # Tensorをfloat型に変換してからround関数を適用
+            distance = obj[1].item() if obj[1] != 0 else 0
+            detected_data[obj[0]] = round(distance / 1000, 2) if distance != 0 else "NA"
 
         # 3つ未満の場合はNAで埋める
         while len(detected_data) < 3:
@@ -154,15 +242,9 @@ class DataOrganizer:
         return detected_data
 
     # データの送信
-    def send_data(self, detected_data, pub):
+    def send_data(self, detected_data):
         data_to_send = json.dumps(detected_data)
         print(data_to_send)
-
-        # メッセージの作成と送信
-        msg = String()
-        msg.data = data_to_send
-        pub.publish(msg)
-
         if self.use_serial_communication:
             self.ser.write((data_to_send + "\r").encode("utf-8"))
         with open(f"{self.output_dir}/output.json", "a") as file:
@@ -191,23 +273,22 @@ class DisplayManager:
         cv2.waitKey(1)
 
 
-# メイン関数
 def main():
     USE_SERIAL_COMMUNICATION = False
     OUTPUT_DIR = "./out"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ノードの初期化
-    rclpy.init()
-    node = rclpy.create_node("publisher_node")
+    # ROS1ノードの初期化
+    rospy.init_node("publisher_node", anonymous=True)
 
     # パブリッシャの設定
-    pub = node.create_publisher(String, "topic", 10)
+    pub = rospy.Publisher("topic", String, queue_size=10)
 
     config = rs.config()
 
     realsense_manager = RealSenseManager(config)
     object_detector = ObjectDetector()
+    distance_calculator = DistanceCalculator()
     white_line_detector = WhiteLineDetector()
     data_organizer = DataOrganizer(OUTPUT_DIR, USE_SERIAL_COMMUNICATION)
 
@@ -215,22 +296,48 @@ def main():
 
     realsense_manager.start_streaming()
 
+    rate = rospy.Rate(10)  # 10hz
+
     try:
-        while True:
+        while not rospy.is_shutdown():
+            # 画像取得
             depth_frame, color_frame = realsense_manager.get_frames()
+
+            # 画像が取得できなかった場合はスキップ
             if not depth_frame or not color_frame:
                 continue
-            depth_image = np.asanyarray(depth_frame.get_data())
-            raw_color_image = np.asanyarray(color_frame.get_data())  # 生の映像を保存
+
+            # 深度画像の穴埋め
             hole_filling = rs.hole_filling_filter(1)
             depth_frame = hole_filling.process(depth_frame)
 
-            detected_objects, yolo_image = object_detector.detect_objects(
-                raw_color_image, depth_image
-            )  # 変更された部分
+            # 深度画像をnumpy配列に変換
+            depth_image = np.asanyarray(depth_frame.get_data())
 
-            detected_data = data_organizer.organize_data(detected_objects)
-            data_organizer.send_data(detected_data, pub)
+            # カラー画像をnumpy配列に変換
+            color_image = np.asanyarray(color_frame.get_data())
+
+            # 生のカラー画像を保存
+            raw_color_image = color_image.copy()
+
+            # 物体検出の実行
+            detected_objects, yolo_image = object_detector.detect_objects(
+                color_image
+            )  # (Label,x,y),image
+
+            # 検出された物体の距離を計算
+            detected_objects_with_distance = []
+            for label, x_center, y_center in detected_objects:
+                # 中心座標をtensor形式からint型に変換
+                x_center = int(x_center)
+                y_center = int(y_center)
+
+                distance = distance_calculator.calculate_distance(
+                    depth_image, x_center, y_center
+                )
+                detected_objects_with_distance.append(
+                    (label, x_center, y_center, distance)
+                )
 
             # 白線を検出する
             white_line_image = white_line_detector.detect_white_lines(raw_color_image)
@@ -239,10 +346,58 @@ def main():
                 raw_color_image, yolo_image, depth_image, white_line_image
             )
 
+            # 白線を検出する
+            white_lines = white_line_detector.detect_white_lines(color_image)
+
+            # 水平に近い白線のみを残す
+            horizontal_lines = white_line_detector.filter_horizontal_lines(white_lines)
+
+            # 白線の中心座標を求める
+            line_centers = white_line_detector.calculate_line_centers(horizontal_lines)
+            print(line_centers)
+
+            # 白線の座標から距離を計算する
+            for x, y in line_centers:
+                distance = distance_calculator.calculate_distance(depth_image, x, y)
+                print(f"white_line_distance: {distance}")
+
+            # 画像に検出した直線を描画
+            white_line_image = white_line_detector.draw_lines(
+                color_image, horizontal_lines
+            )
+
+            # 画像の表示
+            display_manager.display_quadrants(
+                raw_color_image, yolo_image, depth_image, white_line_image
+            )
+
+            # この辺からデータ整理
+
+            # YOLOの結果を整理
+            obstacle_exists = data_organizer.analyze_yolo_results(
+                detected_objects_with_distance,
+            )
+
+            # ライントラックの結果を整理
+            line_exists = data_organizer.analyze_line_results(
+                line_centers, data_organizer.x_range
+            )
+
+            print(f"obstacle_exists: {obstacle_exists}")
+            print(f"line_exists: {line_exists}")
+
+            rate.sleep()
+
+    except KeyboardInterrupt:
+        print("Shutting down")
+
     finally:
         realsense_manager.stop_streaming()
         rclpy.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except rospy.ROSInterruptException:
+        pass
